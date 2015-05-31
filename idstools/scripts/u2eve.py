@@ -57,6 +57,11 @@ except ImportError as err:
 from idstools import unified2
 from idstools import maps
 
+try:
+    from scapy.layers.inet import Ether
+except ImportError as err:
+    print("Please install scapy")
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 LOG = logging.getLogger()
 
@@ -103,15 +108,18 @@ def calculate_flow_id(event):
 class EveFilter(object):
 
     def __init__(
-            self, msgmap=None, classmap=None):
+            self, msgmap=None, classmap=None, event_id=None):
         self.msgmap = msgmap
         self.classmap = classmap
+        self.event_id = event_id
 
     def filter(self, event):
         output = OrderedDict()
         output["timestamp"] = render_timestamp(
             event["event-second"], event["event-microsecond"])
         output["sensor_id"] = event["sensor-id"]
+        if self.event_id:
+            output["event_id"] = event["event-id"]
         output["event_type"] = "alert"
         output["src_ip"] = event["source-ip"]
         if event["protocol"] in [socket.IPPROTO_UDP, socket.IPPROTO_TCP]:
@@ -139,7 +147,14 @@ class EveFilter(object):
 
         # EVE only includes one packet.
         if event["packets"]:
-            output["packet"] = base64.b64encode(event["packets"][0]["data"])
+            packet_data = event["packets"][0]["data"]
+            output["packet"] = base64.b64encode(packet_data)
+            payload = Ether(packet_data).lastlayer()
+            output["payload"] = base64.b64encode(payload.load)
+            p_print = ""
+            for b in payload.load:
+                p_print += unichr(ord(b)) if ord(b) > 32 and ord(b) < 126 else "."
+            output["payload_printable"] = p_print
 
         return output
 
@@ -233,6 +248,12 @@ def main():
         "--directory", metavar="<spool directory>",
         help="spool directory (eg: /var/log/snort)")
     parser.add_argument(
+        "--event-id", action="store_true", default=False,
+        help="include event-id")
+    parser.add_argument(
+        "--ignore-older-than", dest="ignore_ts", type=int,
+        help="Ignore files older than epoch. (spool mode only)")
+    parser.add_argument(
         "--prefix", metavar="<spool file prefix>",
         help="spool filename prefix (eg: unified2.log)")
     parser.add_argument(
@@ -275,7 +296,7 @@ def main():
     else:
         LOG.info("Loaded %s classifications.", classmap.size())
 
-    eve_filter = EveFilter(msgmap, classmap)
+    eve_filter = EveFilter(msgmap, classmap, args.event_id)
 
     outputs = []
 
@@ -292,7 +313,8 @@ def main():
             prefix=args.prefix,
             follow=args.follow,
             delete=args.delete,
-            bookmark=args.bookmark)
+            bookmark=args.bookmark,
+            ignore_ts=args.ignore_ts)
     elif args.filenames:
         reader = unified2.FileEventReader(*args.filenames)
     else:
