@@ -667,13 +667,15 @@ class SpoolRecordReader(object):
     """
 
     def __init__(self, directory, prefix, init_filename=None, init_offset=None,
-                 follow=False, rollover_hook=None):
+                 follow=False, rollover_hook=None, ignore_ts=None):
         self.directory = directory
         self.prefix = prefix
         self.follow = follow
         self.rollover_hook = rollover_hook
         self.fileobj = None
         self.reader = None
+        self.ignore_ts = ignore_ts
+        self.retry_counter = 0
         self.fnfilter = "%s*" % (self.prefix)
 
         if init_filename:
@@ -685,7 +687,16 @@ class SpoolRecordReader(object):
 
     def get_filenames(self):
         """Return the filenames (sorted) from the spool directory."""
-        return sorted(fnmatch.filter(os.listdir(self.directory), self.fnfilter))
+        all_files = sorted(fnmatch.filter(os.listdir(self.directory), self.fnfilter))
+        if self.ignore_ts:
+            files = []
+            for f in all_files:
+                created = int(os.path.basename(f).split('.')[-1])
+                if created > self.ignore_ts:
+                    files.append(f)
+        else:
+            files = all_files
+        return files
 
     def open_file(self, filename):
         if self.fileobj:
@@ -749,7 +760,13 @@ class SpoolRecordReader(object):
         try:
             record = self.reader.next()
         except EOFError:
-            return
+            if self.retry_counter < 3:
+                self.retry_counter += 1
+                return
+            else:
+                LOG.warn("Unified2 record seems to be unfinshed. Try moving on to the next file")
+                self.retry_counter = 0
+                record = None
         if record:
             return record
         else:
@@ -815,10 +832,11 @@ class SpoolEventReader(object):
     """
 
     def __init__(self, directory, prefix, follow=False, delete=False,
-                 bookmark=False):
+                 bookmark=False, ignore_ts=None):
 
         self.follow = follow
         self.delete = delete
+        self.ignore_ts = ignore_ts
 
         self.aggregator = Aggregator()
 
@@ -836,7 +854,8 @@ class SpoolEventReader(object):
         # we can flush the aggregator after a timeout.
         self.reader = SpoolRecordReader(
             directory, prefix, init_filename=init_filename,
-            init_offset=init_offset, rollover_hook=self.rollover_hook)
+            init_offset=init_offset, rollover_hook=self.rollover_hook, 
+            ignore_ts=self.ignore_ts)
 
     def rollover_hook(self, closed, opened):
         if closed:
